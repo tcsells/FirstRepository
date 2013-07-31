@@ -1,0 +1,258 @@
+/*
+		This class creates accounting journal entries and should only be run by authorize personnel at appropriate times
+			
+******************** TO DO ITEMS ***********************************
+
+    [COMPLETE]1. MA Supplement needs to be addressed at the BEGINNING of the run
+    	- Populate 6000 Fund Activities with 'Support Account' Disburse Type
+    	- Convert CommittedSupport query to use Disburse_Type = 'Support Account'
+    [COMPLETE]2. IF short, partial payment needs to be made to the final account
+       	- this should allow the loop to run out on its own, but uses code statements
+       	- consider re-designing the loop for a "while loop" or find ways to not execute if the priority does not exist 	
+	[COMPLETE]3. Begin considerations for re-factoring to pull main functions (preprocess and disburse) into separate classes
+	[COMPLETE]4. Continue writing Tests
+	5. Put a conditional test on the support account retrieval and end the process for the account if non exists
+	6. Create Exception Object/Report/View
+		- may be part of #7 below.
+	7. Need to add a VALIDATE_SC process between preprocess and process that creates exceptions, etc, for review
+		- Need a design discussion on what is to be displayed
+	8. Track the sum of unpaid salary for each misssionary (per month?) so that we can reconcile uncommitted support, etc., at year end
+	9. May need to come up with a different name for "Salary Supplement" SC Disburse Type (very low priority if at all)
+	[COMPLETE]10. Need to re-address the build and function of Current Month Disb.  Need to be able to utilize 0 as a factor
+	
+	
+*/
+
+
+public with sharing class SC_Process {
+
+
+	private static final integer REQUIRED_ITEMS = 1;
+	private static final integer PRIORITY_LIMIT = 18;
+	private static final string MINISTRY_ACCOUNT = 'Ministry Account';
+	private static final string SUPPORT_ACCOUNT = 'Support Account';
+
+	public static map<id,AcctSeed__Project_Task__c> fundActivitiesToUpdate; 
+	public static map<id, AcctSeed__Project_Task__c> CommittedSupport;
+
+
+/*=================================================================================================================================================================================*/ 
+
+	public static void execute(boolean validate){
+		
+		initialize();
+		disburse_sc();
+		if (validate == false)
+			performAllUpdates();
+			
+	}
+
+/*=================================================================================================================================================================================*/        
+
+	private static void initialize(){
+		
+		
+		fundActivitiesToUpdate = new map<id,AcctSeed__Project_Task__c>(); 	
+		
+
+		//load committment values by account (committed and needed)
+		CommittedSupport = new map<id, AcctSeed__Project_Task__c>();
+		for (AcctSeed__Project_Task__c fa : [Select a.Commitment_Total__c, a.AcctSeed__Budgeted_Revenue__c, a.Account__c From AcctSeed__Project_Task__c a 
+											WHERE AcctSeed__Project__c IN (Select ID From AcctSeed__Project__c a WHERE name IN ('6050-Support Appointee', '6000-Support Career')) 
+											AND AcctSeed__Status__c = 'Active' AND Account__c IN (Select w.Account__c From WV_Support_Configuration__c w WHERE w.Status__c <> 'Inactive' AND Category__c = 'Career')]){
+													
+			CommittedSupport.put(fa.Account__c, fa);
+		}														
+
+		
+	}
+
+
+
+/*=================================================================================================================================================================================
+
+
+*/        
+	private static void disburse_sc(){
+		
+		for (ID AcctID : WV_SupportCalculation.missionaries.keyset() ){
+			system.debug('SUPPORTCALC ACCOUNT: - ' + AcctID );
+			decimal TotalAvailable = getAvailableTotal(AcctID);
+			decimal DisburseTotal = getDisburseTotal(REQUIRED_ITEMS, AcctID);
+			
+			system.debug('SUPPORTCALC: - ' + AcctID + '-' + TotalAvailable);
+			
+			if (DisburseTotal < TotalAvailable){
+								
+				AcctSeed__Project_Task__c supportAcct = SC_LIB.getActivity(WV_SupportCalculation.missionaryActivities.get(AcctID), SUPPORT_ACCOUNT);
+				
+				//Disburse required items (Priority 1)			
+				for (AcctSeed__Project_Task__c fa : WV_SupportCalculation.missionaryActivities.get(AcctID)){
+					if(fa.disburse_priority__c == REQUIRED_ITEMS){
+						
+						//CREDIT fund, debit support
+//						createJELine(fa, fa, 0, fa.Current_Month_Disburse__c);						
+//						createJELine(supportAcct, fa, fa.Current_Month_Disburse__c, 0);					
+						TotalAvailable = TotalAvailable - fa.Current_Month_Disburse__c;
+						
+						fa.Last_Disburse_Amount__c = fa.Current_Month_Disburse__c;
+						fa.Last_Disburse_Date__c =date.today();
+						
+						fundActivitiesToUpdate.put(fa.id, fa);
+//						system.debug('SUPPORTCALC:       ' + funds.get(fa.AcctSeed__Project__c).name + ' - ' + fa.Current_Month_Disburse__c.setScale(2) + ' - remaining: ' + TotalAvailable.setScale(2));
+					}
+				}
+				system.debug('SUPPORTCALC ===============================End General Items==========================================');
+				//Disburse all other by priority
+				for (integer PRIORITY = 2; PRIORITY <= PRIORITY_LIMIT; PRIORITY++){
+					
+					
+					if(TotalAvailable > 0){
+					
+					
+						for (AcctSeed__Project_Task__c fa : WV_SupportCalculation.missionaryActivities.get(AcctID)){
+							if(fa.disburse_priority__c == PRIORITY){
+								fa.Last_Disburse_Amount__c = 0;
+								fa.Last_Disburse_Amount__c = 0;
+								
+								if (fa.Current_Month_Disburse__c==null)
+									fa.Current_Month_Disburse__c = 0;
+									
+								decimal amtToDisburse = fa.Current_Month_Disburse__c;
+														
+								//Disburse partial if not enough to pay last item
+								if(amtToDisburse > TotalAvailable)
+									amtToDisburse = TotalAvailable;
+								
+								
+								//CREDIT fund, debit support
+//								createJELine(fa, fa, 0, amtToDisburse);
+//								createJELine(supportAcct, fa, amtToDisburse, 0);
+			
+								TotalAvailable = TotalAvailable - amtToDisburse;
+								
+								fa.Last_Disburse_Amount__c = amtToDisburse;
+								fa.Last_Disburse_Date__c =date.today();
+								
+								fundActivitiesToUpdate.put(fa.id, fa);
+								
+//								system.debug('SUPPORTCALC:       ' + funds.get(fa.AcctSeed__Project__c).name + ' - ' + amtToDisburse.setScale(2) + ' - remaining: ' + TotalAvailable.setScale(2));
+							}
+						}
+
+					} else {
+						for (AcctSeed__Project_Task__c fa : WV_SupportCalculation.missionaryActivities.get(AcctID)){
+							if(fa.disburse_priority__c == PRIORITY){
+								fa.Last_Disburse_Amount__c = 0;
+								fundActivitiesToUpdate.put(fa.id, fa);								
+							}
+						}						
+					}	
+					
+				
+				}			
+			}
+					
+		}
+	}	
+
+/*=================================================================================================================================================================================*/        
+
+	private static decimal getDisburseTotal(integer Priority, ID MissionaryID){
+		
+		decimal disbtotal = 0;
+		AcctSeed__Project_Task__c[] fas = WV_SupportCalculation.missionaryActivities.get(MissionaryID);
+		for (AcctSeed__Project_Task__c fa : fas)
+			if (fa.disburse_priority__c == priority){
+				if(fa.Current_Month_Disburse__c==null) 
+					fa.Current_Month_Disburse__c = 0;
+				disbtotal = disbtotal + fa.Current_Month_Disburse__c;
+			}
+		return disbtotal;
+	}
+	
+/*=================================================================================================================================================================================*/        
+
+	private static decimal getAvailableTotal(ID MissionaryID){
+		
+		
+		decimal totalamount = (CommittedSupport.get(MissionaryID).Commitment_Total__c)/12;
+		
+		//Get Fund Activity variables		
+		AcctSeed__Project_Task__c ma = SC_LIB.getActivity(WV_SupportCalculation.missionaryActivities.get(MissionaryID), MINISTRY_ACCOUNT);		
+		AcctSeed__Project_Task__c sa = SC_LIB.getActivity(WV_SupportCalculation.missionaryActivities.get(MissionaryID), SUPPORT_ACCOUNT);
+		decimal JEAmount;	
+			
+		//determine if missionary is short in support
+		if(CommittedSupport.get(MissionaryID).AcctSeed__Budgeted_Revenue__c==null) 
+			CommittedSupport.get(MissionaryID).AcctSeed__Budgeted_Revenue__c=0;
+		
+		decimal supportdifference = (((CommittedSupport.get(MissionaryID).AcctSeed__Budgeted_Revenue__c)/12) - totalamount);
+		if (supportdifference > 0) {
+			system.debug('SUPPORTCALC DIFFERENCE:' + supportdifference);
+			//If short, determine if support should be supplemented by MA
+			if((WV_SupportCalculation.missionaries.get(MissionaryID).MA_Supplement__c == true) && (ma.Balance__c > 0)){
+				
+				//Determine how much can/should be supplemented
+				if(WV_SupportCalculation.missionaries.get(MissionaryID).MA_Supplement_Limit__c > 0){
+					
+					if (ma.Balance__c >= WV_SupportCalculation.missionaries.get(MissionaryID).MA_Supplement_Limit__c) {
+
+						if(supportdifference > WV_SupportCalculation.missionaries.get(MissionaryID).MA_Supplement_Limit__c)
+							JEAmount = WV_SupportCalculation.missionaries.get(MissionaryID).MA_Supplement_Limit__c;
+						else
+							JEAmount = ma.Balance__c;
+							
+						totalamount = totalamount + JEAmount;
+						
+						//Credit Support, Debit Ministries
+//						createJELine(sa, sa, 0, JEAmount);
+//						createJELine(ma, sa, JEAmount, 0);
+						
+					}
+					else{
+						if(supportdifference > ma.Balance__c)
+							JEAmount = ma.Balance__c;
+						else
+							JEAmount = supportdifference;
+							
+						totalamount = totalamount + JEAmount;
+						
+						//Credit Support, Debit Ministries
+//						createJELine(sa, sa, 0, JEAmount);
+//						createJELine(ma, sa, JEAmount, 0);
+					
+					}
+				} else {
+					if(supportdifference > ma.Balance__c)
+						JEAmount = ma.Balance__c;
+					else
+						JEAmount = supportdifference;
+						
+					totalamount = totalamount + JEAmount;
+						
+					//Credit Support, Debit Ministries
+//					createJELine(sa, sa, 0, JEAmount);
+//					createJELine(ma, sa, JEAmount, 0);
+				}
+			}
+			
+		}
+		
+		
+		return totalamount;
+	}
+	
+
+/*=================================================================================================================================================================================*/        
+
+	private static void performAllUpdates(){
+
+		
+		if(fundActivitiesToUpdate.size() > 0)
+			upsert fundActivitiesToUpdate.values();
+		
+	}	
+
+
+}
